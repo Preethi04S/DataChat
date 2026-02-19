@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DataChat — AI-Powered Dataset Explorer | Akaike Technologies</title>
+    <meta name="description" content="Enterprise AI analytics chatbot with proof-carrying, audit-ready answers. Powered by Akaike Technologies.">
+    <meta name="robots" content="noindex, nofollow">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/ui/styles.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+</head>
+<body>
+    <canvas id="bg-canvas"></canvas>
+
+    <div class="app-container">
+        <header>
+            <div class="logo-row">
+                <div class="logo-icon">
+                    <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
+                        <rect width="32" height="32" rx="8" fill="url(#logo-grad)"/>
+                        <path d="M8 12h16M8 16h12M8 20h8" stroke="white" stroke-width="2" stroke-linecap="round"/>
+                        <circle cx="24" cy="20" r="4" fill="white" fill-opacity="0.3"/>
+                        <path d="M23 19l1 2 2-3" stroke="white" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                        <defs><linearGradient id="logo-grad" x1="0" y1="0" x2="32" y2="32"><stop stop-color="#a855f7"/><stop offset="1" stop-color="#ec4899"/></linearGradient></defs>
+                    </svg>
+                </div>
+                <h1>DataChat</h1>
+            </div>
+            <p>Enterprise AI-powered dataset explorer &mdash; ask questions, see visualizations, get audit-ready answers</p>
+            <p class="powered-by">Powered by <strong>Akaike Technologies</strong></p>
+            <div class="header-actions">
+                <div id="dataset-badge" class="dataset-badge">
+                    <span class="badge-dot"></span>
+                    <span id="dataset-name">Loading...</span>
+                </div>
+                <button class="theme-toggle" id="theme-toggle" title="Toggle dark/light theme">
+                    <svg id="theme-icon-sun" width="16" height="16" viewBox="0 0 16 16" fill="currentColor" style="display:none"><circle cx="8" cy="8" r="3.5"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3.05 3.05l1.41 1.41M11.54 11.54l1.41 1.41M3.05 12.95l1.41-1.41M11.54 4.46l1.41-1.41"/></svg>
+                    <svg id="theme-icon-moon" width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M14.3 10.8A7 7 0 015.2 1.7 7 7 0 108 15a7 7 0 006.3-4.2z"/></svg>
+                    <span id="theme-label">Dark</span>
+                </button>
+                <button class="theme-toggle" id="bookmarks-toggle" title="Open saved queries">
+                    <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M2 2a2 2 0 012-2h8a2 2 0 012 2v13l-6-3-6 3V2z"/></svg>
+                    <span>Saved (<span id="bookmark-count-header">0</span>)</span>
+                </button>
+            </div>
+        </header>
+
+        <!-- Upload Section -->
+        <div class="upload-section" id="upload-section">
+            <div class="upload-area" id="upload-area">
+                <div class="upload-icon">
+                    <svg width="48" height="48" viewBox="0 0 48 48" fill="none">
+                        <path d="M24 32V16m0 0l-6 6m6-6l6 6" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+                        <path d="M40 30v4a4 4 0 01-4 4H12a4 4 0 01-4-4v-4" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                </div>
+                <p class="upload-title">Drop your dataset here or click to browse</p>
+                <p class="upload-subtitle">Supports CSV, JSON, Excel (.xlsx/.xls), TSV &middot; Max 50 MB</p>
+                <div class="file-type-pills">
+                    <span class="pill pill-csv">.CSV</span>
+                    <span class="pill pill-json">.JSON</span>
+                    <span class="pill pill-excel">.XLSX</span>
+                    <span class="pill pill-tsv">.TSV</span>
+                </div>
+                <input type="file" id="file-input" accept=".csv,.json,.xls,.xlsx,.tsv" hidden>
+            </div>
+            <div id="upload-progress" class="upload-progress hidden">
+                <div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
+                <span id="upload-status">Uploading...</span>
+            </div>
+        </div>
+
+        <div class="tabs">
+            <button class="tab-btn active" data-tab="tab-chat">
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M2 2a2 2 0 012-2h8a2 2 0 012 2v8a2 2 0 01-2 2H6l-4 4V2z"/></svg>
+                Chat
+            </button>
+            <button class="tab-btn" data-tab="tab-schema">
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M0 2a2 2 0 012-2h12a2 2 0 012 2v12a2 2 0 01-2 2H2a2 2 0 01-2-2V2zm2 0v4h5V2H2zm7 0v4h5V2H9zM2 8v4h5V8H2zm7 0v4h5V8H9z"/></svg>
+                Schema
+            </button>
+            <button class="tab-btn" data-tab="tab-examples">
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0a1 1 0 011 1v6h6a1 1 0 110 2H9v6a1 1 0 11-2 0V9H1a1 1 0 010-2h6V1a1 1 0 011-1z"/></svg>
+                Examples
+            </button>
+            <button class="tab-btn" data-tab="tab-analytics">
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M0 13h16v2H0v-2zm1-4h2v4H1V9zm4-3h2v7H5V6zm4-4h2v11H9V2zm4 2h2v9h-2V4z"/></svg>
+                Analytics
+            </button>
+            <button class="tab-btn" data-tab="tab-quality">
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0l2.5 5 5.5.8-4 3.9.9 5.3L8 12.4 3.1 15l.9-5.3-4-3.9L5.5 5z"/></svg>
+                Data Quality
+            </button>
+        </div>
+
+        <div id="tab-chat" class="tab-content active">
+            <div class="chat-input-area">
+                <div class="input-wrapper">
+                    <input type="text" id="chat-input" placeholder="Ask anything about your dataset..." maxlength="500" autocomplete="off" aria-label="Ask a question about your dataset" role="searchbox">
+                    <div class="char-count"><span id="char-count">0</span>/500</div>
+                </div>
+                <div class="chat-actions">
+                    <button id="voice-btn" class="btn-icon" title="Voice input (speech-to-text)" aria-label="Start voice input">
+                        <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                            <rect x="7" y="1" width="6" height="10" rx="3"/>
+                            <path d="M4 9a6 6 0 0012 0"/>
+                            <line x1="10" y1="15" x2="10" y2="19"/>
+                            <line x1="7" y1="19" x2="13" y2="19"/>
+                        </svg>
+                    </button>
+                    <button id="chat-submit" class="btn-primary" aria-label="Submit question">
+                        <svg width="18" height="18" viewBox="0 0 18 18" fill="none"><path d="M2 9l7-7v4.5h7v5H9V16L2 9z" fill="currentColor"/></svg>
+                        Ask
+                    </button>
+                </div>
+            </div>
+            <div class="stats-bar">
+                <div class="stats-left">
+                    <span class="stats-display" id="stats-display">No queries yet</span>
+                    <span class="kbd-hint"><kbd>Ctrl</kbd>+<kbd>K</kbd> focus &middot; <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd> clear</span>
+                </div>
+                <button class="btn-clear" onclick="clearChat()">
+                    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M1 1l12 12M13 1L1 13"/></svg>
+                    Clear
+                </button>
+            </div>
+            <div id="chat-history" class="chat-history">
+                <div class="empty-state" id="empty-state">
+                    <div class="empty-icon">
+                        <svg width="64" height="64" viewBox="0 0 64 64" fill="none">
+                            <circle cx="32" cy="32" r="28" stroke="url(#empty-grad)" stroke-width="2" stroke-dasharray="6 4"/>
+                            <path d="M22 28h20M22 34h14M22 40h8" stroke="url(#empty-grad)" stroke-width="2" stroke-linecap="round"/>
+                            <defs><linearGradient id="empty-grad" x1="0" y1="0" x2="64" y2="64"><stop stop-color="#a855f7" stop-opacity="0.5"/><stop offset="1" stop-color="#ec4899" stop-opacity="0.5"/></linearGradient></defs>
+                        </svg>
+                    </div>
+                    <p class="empty-title">Start exploring your data</p>
+                    <p class="empty-subtitle">Ask a question or click an example to begin</p>
+                    <div class="quick-actions" id="quick-actions"></div>
+                </div>
+            </div>
+        </div>
+
+        <div id="tab-schema" class="tab-content">
+            <div id="schema-content">
+                <div class="loading"><div class="spinner"></div><span>Loading schema...</span></div>
+            </div>
+        </div>
+
+        <div id="tab-examples" class="tab-content">
+            <div id="examples-content">
+                <div class="loading"><div class="spinner"></div><span>Loading examples...</span></div>
+            </div>
+        </div>
+
+        <div id="tab-analytics" class="tab-content">
+            <div id="analytics-content">
+                <div class="loading"><div class="spinner"></div><span>Loading analytics...</span></div>
+            </div>
+        </div>
+
+        <div id="tab-quality" class="tab-content">
+            <div id="quality-content">
+                <div class="loading"><div class="spinner"></div><span>Analyzing data quality...</span></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Session Info (hidden, generated) -->
+    <div class="session-badge" id="session-badge" title="Session tracking for multi-turn conversations">
+        <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor"><circle cx="6" cy="6" r="5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M6 3v3.5l2 1.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
+        <span id="session-id-display"></span>
+    </div>
+
+    <!-- Book Detail Modal -->
+    <div class="modal-overlay" id="book-modal">
+        <div class="modal">
+            <div class="modal-header">
+                <div class="modal-title" id="modal-title">Book Details</div>
+                <button class="modal-close" onclick="closeModal()">&times;</button>
+            </div>
+            <div class="modal-body" id="modal-body"></div>
+            <div class="modal-actions" id="modal-actions"></div>
+        </div>
+    </div>
+
+    <!-- Bookmarks Slide Panel -->
+    <div class="bookmarks-panel" id="bookmarks-panel">
+        <div class="bookmarks-header">
+            <div>
+                <span class="bookmarks-title">Saved Queries</span>
+                <span class="bookmarks-count" id="bookmark-count">0</span>
+            </div>
+            <button class="modal-close" onclick="toggleBookmarks()">&times;</button>
+        </div>
+        <div id="bookmarks-list"></div>
+    </div>
+
+    <script src="/ui/app.js"></script>
+</body>
+</html>
