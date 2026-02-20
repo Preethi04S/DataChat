@@ -1,188 +1,283 @@
 """
-Data loader: reads the three CSV files, cleans them, and produces
+Data loader: reads the three CSV files, cleans/parses them, and produces
 a single unified SQLite in-memory database ready for querying.
+
+Real schema (from actual CSVs):
+  game_ids.csv        : appid, name
+  game_data.csv       : steam_appid, name, is_free, genres (list-of-dicts),
+                        categories (list-of-dicts), supported_languages,
+                        price_overview (dict), release_date (dict), metacritic (dict)
+  additional_data.csv : appid, name, positive, negative, userscore,
+                        owners, price (cents), initialprice, languages, genre, tags
 """
-import os
 import re
+import ast
 import sqlite3
 import pandas as pd
 from pathlib import Path
 
-DATA_DIR = Path(__file__).parent.parent / "data" / "csv"
+DATA_DIR = Path(__file__).parent / "csv"
 
-# ── helpers ──────────────────────────────────────────────────────────────────
 
-def _parse_price(val) -> float:
-    """Convert '$9.99', 'Free', 0, etc. to a float."""
+# ── helpers ───────────────────────────────────────────────────────────────────
+
+def _safe_eval(val):
     if pd.isna(val):
-        return 0.0
-    s = str(val).strip().lower()
-    if s in ("free", "0", "0.0", ""):
-        return 0.0
-    s = re.sub(r"[^\d.]", "", s)
+        return None
     try:
-        return float(s)
-    except ValueError:
+        return ast.literal_eval(str(val))
+    except Exception:
+        return str(val)
+
+
+def _extract_genres(val) -> str:
+    """Parse '[{"id":"1","description":"Action"},...]' → 'Action, Indie'."""
+    obj = _safe_eval(val)
+    if isinstance(obj, list):
+        return ", ".join(
+            str(item.get("description", "")) for item in obj
+            if isinstance(item, dict) and item.get("description")
+        )
+    if isinstance(obj, str):
+        return obj
+    return ""
+
+
+def _extract_categories(val) -> str:
+    return _extract_genres(val)
+
+
+def _extract_price_usd(val) -> float:
+    """price_overview dict → USD. 'final' field is in cents."""
+    obj = _safe_eval(val)
+    if isinstance(obj, dict):
+        final = obj.get("final") or obj.get("initial") or 0
+        try:
+            return round(float(final) / 100, 2)
+        except Exception:
+            return 0.0
+    try:
+        return round(float(str(val).replace(",", "")) / 100, 2)
+    except Exception:
         return 0.0
 
 
-def _parse_bool(val) -> int:
-    if pd.isna(val):
-        return 0
-    s = str(val).strip().lower()
-    return 1 if s in ("true", "1", "yes") else 0
+def _extract_release_year(val):
+    """release_date dict {'coming_soon': False, 'date': '1 Nov, 2000'} → 2000."""
+    obj = _safe_eval(val)
+    if isinstance(obj, dict):
+        date_str = obj.get("date", "")
+    else:
+        date_str = str(val) if val else ""
+    parsed = pd.to_datetime(date_str, errors="coerce")
+    return int(parsed.year) if not pd.isna(parsed) else None
 
 
-def _to_list_str(val) -> str:
-    """Normalise list-like columns (genres, languages) to comma-separated strings."""
+def _extract_metacritic(val):
+    obj = _safe_eval(val)
+    if isinstance(obj, dict):
+        return obj.get("score")
+    try:
+        return float(val)
+    except Exception:
+        return None
+
+
+def _clean_languages(val) -> str:
     if pd.isna(val):
         return ""
-    s = str(val).strip()
-    # Remove brackets/quotes
-    s = re.sub(r"[\[\]'\"]", "", s)
-    return s
+    return re.sub(r"<[^>]+>", "", str(val)).strip()
+
+
+def _owners_midpoint(val):
+    """'10,000,000 .. 20,000,000' → 15000000.0"""
+    try:
+        nums = [float(p.replace(",", "")) for p in re.findall(r"[\d,]+", str(val))]
+        return sum(nums) / len(nums) if nums else None
+    except Exception:
+        return None
 
 
 # ── main loader ───────────────────────────────────────────────────────────────
 
-def load_data() -> tuple[pd.DataFrame, sqlite3.Connection]:
+def load_data() -> tuple:
     """
-    Load & clean game_ids, game_data, additional_data CSVs.
-    Returns (merged DataFrame, in-memory SQLite connection).
+    Load & clean all three CSVs → unified in-memory SQLite.
+    Returns (merged DataFrame, sqlite3 connection).
     """
     csv_dir = DATA_DIR
 
-    game_ids_path       = csv_dir / "game_ids.csv"
-    game_data_path      = csv_dir / "game_data.csv"
-    additional_data_path= csv_dir / "additional_data.csv"
+    game_ids_path        = csv_dir / "game_ids.csv"
+    game_data_path       = csv_dir / "game_data.csv"
+    additional_data_path = csv_dir / "additional_data.csv"
 
-    # ── 1. Read files (tolerate missing files gracefully) ────────────────────
-    dfs = {}
-    for name, path in [
-        ("game_ids",        game_ids_path),
-        ("game_data",       game_data_path),
-        ("additional_data", additional_data_path),
-    ]:
-        if path.exists():
-            dfs[name] = pd.read_csv(path, low_memory=False)
-            print(f"  Loaded {name}: {len(dfs[name])} rows")
-        else:
-            print(f"  WARNING: {path} not found — skipping")
-            dfs[name] = pd.DataFrame()
+    if not any(p.exists() for p in [game_ids_path, game_data_path, additional_data_path]):
+        raise FileNotFoundError(
+            f"No CSV files found in {csv_dir}. "
+            "Place game_ids.csv, game_data.csv, additional_data.csv there."
+        )
 
-    # ── 2. Merge ─────────────────────────────────────────────────────────────
-    # Identify the common key (usually 'AppID' or 'app_id')
-    df = _merge_dfs(dfs)
-    print(f"  Merged dataset: {len(df)} rows, {len(df.columns)} columns")
+    # ── 1. Read ───────────────────────────────────────────────────────────────
+    ids_df = pd.DataFrame()
+    if game_ids_path.exists():
+        ids_df = pd.read_csv(game_ids_path, low_memory=False)
+        ids_df.columns = ids_df.columns.str.strip().str.lower()
+        print(f"  game_ids:        {len(ids_df):,} rows")
 
-    # ── 3. Clean / Normalise ─────────────────────────────────────────────────
+    gd_df = pd.DataFrame()
+    if game_data_path.exists():
+        usecols_wanted = {
+            "steam_appid", "name", "is_free",
+            "genres", "categories", "supported_languages",
+            "price_overview", "release_date", "metacritic",
+            "developers", "publishers", "platforms", "short_description",
+        }
+        gd_df = pd.read_csv(
+            game_data_path,
+            usecols=lambda c: c in usecols_wanted,
+            low_memory=False,
+        )
+        gd_df.rename(columns={"steam_appid": "appid"}, inplace=True)
+        print(f"  game_data:       {len(gd_df):,} rows")
+
+    ad_df = pd.DataFrame()
+    if additional_data_path.exists():
+        ad_df = pd.read_csv(additional_data_path, low_memory=False)
+        ad_df.columns = ad_df.columns.str.strip().str.lower()
+        print(f"  additional_data: {len(ad_df):,} rows")
+
+    # ── 2. Merge ──────────────────────────────────────────────────────────────
+    # Base = additional_data (has ratings, price in cents, languages)
+    # Merge game_data columns not already present
+    if not ad_df.empty:
+        df = ad_df.copy()
+    elif not gd_df.empty:
+        df = gd_df.copy()
+    else:
+        df = ids_df.copy()
+
+    if not gd_df.empty and "appid" in df.columns and "appid" in gd_df.columns:
+        extra_cols = [c for c in gd_df.columns if c not in df.columns] + ["appid"]
+        df = df.merge(gd_df[extra_cols], on="appid", how="left")
+
+    print(f"  Merged shape:    {df.shape}")
+
+    # ── 3. Parse & Clean ─────────────────────────────────────────────────────
     df = _clean(df)
 
-    # ── 4. Write to SQLite ───────────────────────────────────────────────────
+    # ── 4. SQLite ─────────────────────────────────────────────────────────────
     conn = sqlite3.connect(":memory:")
     df.to_sql("games", conn, if_exists="replace", index=False)
     conn.commit()
-
+    print(f"  SQLite ready:    {len(df):,} games")
     return df, conn
 
 
-def _merge_dfs(dfs: dict) -> pd.DataFrame:
-    base = dfs.get("game_ids", pd.DataFrame())
-    data = dfs.get("game_data", pd.DataFrame())
-    extra = dfs.get("additional_data", pd.DataFrame())
-
-    # Normalise column names to lower snake_case
-    for key in list(dfs.keys()):
-        dfs[key].columns = [c.strip().lower().replace(" ", "_") for c in dfs[key].columns]
-
-    base  = dfs["game_ids"]
-    data  = dfs["game_data"]
-    extra = dfs["additional_data"]
-
-    # Find join key
-    id_cols = ["appid", "app_id", "id", "gameid", "game_id", "steamappid"]
-    key = None
-    for c in id_cols:
-        if c in base.columns:
-            key = c
-            break
-
-    if base.empty:
-        df = data if not data.empty else extra
-    elif data.empty and extra.empty:
-        df = base
-    else:
-        if key and not data.empty and key in data.columns:
-            df = base.merge(data, on=key, how="outer", suffixes=("", "_data"))
-        elif not data.empty:
-            df = pd.concat([base, data], axis=1) if len(base) == len(data) else base
-            df = data  # fallback
-        else:
-            df = base
-
-        if key and not extra.empty and key in extra.columns:
-            df = df.merge(extra, on=key, how="left", suffixes=("", "_extra"))
-        elif not extra.empty:
-            # Try to concat by rows if shapes differ
-            pass
-
-    return df
-
-
 def _clean(df: pd.DataFrame) -> pd.DataFrame:
-    # Standardise column names
-    df.columns = [c.strip().lower().replace(" ", "_") for c in df.columns]
+    df = df.copy()
+    df.columns = df.columns.str.strip().str.lower()
 
-    # Price
-    for col in ["price", "price_usd", "original_price", "initialprice"]:
+    # Name
+    for col in ["name", "title", "game_name"]:
         if col in df.columns:
-            df[col] = df[col].apply(_parse_price)
-            df.rename(columns={col: "price"}, inplace=True)
+            if col != "name":
+                df.rename(columns={col: "name"}, inplace=True)
             break
-    if "price" not in df.columns:
-        df["price"] = 0.0
 
-    # is_free flag
-    if "is_free" not in df.columns:
-        df["is_free"] = (df["price"] == 0.0).astype(int)
+    # Price (USD) — additional_data 'price' column is in cents
+    if "price" in df.columns:
+        df["price_usd"] = pd.to_numeric(df["price"], errors="coerce").fillna(0) / 100
+    elif "price_overview" in df.columns:
+        df["price_usd"] = df["price_overview"].apply(_extract_price_usd)
     else:
-        df["is_free"] = df["is_free"].apply(_parse_bool)
+        df["price_usd"] = 0.0
 
-    # Release year
-    for col in ["release_date", "releasedate", "released"]:
-        if col in df.columns:
-            df["release_year"] = pd.to_datetime(df[col], errors="coerce").dt.year
-            break
-    if "release_year" not in df.columns:
-        df["release_year"] = None
+    # is_free
+    if "is_free" in df.columns:
+        df["is_free"] = df["is_free"].map(
+            {True: 1, False: 0, "True": 1, "False": 0, 1: 1, 0: 0}
+        ).fillna((df["price_usd"] == 0).astype(int))
+    else:
+        df["is_free"] = (df["price_usd"] == 0).astype(int)
 
-    # Ratings / scores
-    for col in ["rating", "positive_ratings", "score", "metacritic_score",
-                "positive", "review_score"]:
+    # Genres — additional_data has plain string 'genre'; game_data has list-of-dicts 'genres'
+    if "genre" in df.columns and "genres" not in df.columns:
+        df.rename(columns={"genre": "genres"}, inplace=True)
+    elif "genres" in df.columns:
+        df["genres"] = df["genres"].apply(_extract_genres)
+
+    # Categories
+    if "categories" in df.columns:
+        df["categories"] = df["categories"].apply(_extract_categories)
+
+    # Languages — prefer 'languages' (additional_data), fallback 'supported_languages'
+    if "languages" not in df.columns and "supported_languages" in df.columns:
+        df.rename(columns={"supported_languages": "languages"}, inplace=True)
+    if "languages" in df.columns:
+        df["languages"] = df["languages"].apply(_clean_languages)
+    if "supported_languages" in df.columns:
+        df["supported_languages"] = df["supported_languages"].apply(_clean_languages)
+
+    # Ratings
+    for col in ["positive", "negative", "userscore", "ccu"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    # List columns → clean strings
-    for col in ["genres", "categories", "supported_languages", "languages"]:
-        if col in df.columns:
-            df[col] = df[col].apply(_to_list_str)
+    # Computed rating (positive ratio × 10, 0–10 scale)
+    if "positive" in df.columns and "negative" in df.columns:
+        total = df["positive"].fillna(0) + df["negative"].fillna(0)
+        df["rating"] = (df["positive"].fillna(0) / total.replace(0, float("nan"))) * 10
+        df["rating"] = df["rating"].round(2)
 
-    # Name fallback
-    for col in ["name", "title", "game_name", "gamename"]:
-        if col in df.columns:
-            df.rename(columns={col: "name"}, inplace=True)
-            break
+    # Metacritic
+    if "metacritic" in df.columns:
+        df["metacritic_score"] = df["metacritic"].apply(_extract_metacritic)
+        df.drop(columns=["metacritic"], inplace=True)
 
-    # Drop fully-duplicate rows
-    df.drop_duplicates(inplace=True)
+    # Release year
+    if "release_date" in df.columns:
+        df["release_year"] = df["release_date"].apply(_extract_release_year)
+
+    # Owners
+    if "owners" in df.columns:
+        df["owners_estimate"] = df["owners"].apply(_owners_midpoint)
+
+    # Multiplayer flag
+    multi_src = df.get("categories", df.get("tags", pd.Series([""] * len(df), dtype=str)))
+    df["has_multiplayer"] = multi_src.fillna("").str.contains(
+        r"Multi-?[Pp]layer|multiplayer|Online Multi-Player", regex=True, na=False
+    ).astype(int)
+
+    # Price tier
+    def _tier(p):
+        if p == 0:   return "Free"
+        if p < 5:    return "Budget (<$5)"
+        if p < 20:   return "Mid ($5-$20)"
+        return "Premium ($20+)"
+    df["price_tier"] = df["price_usd"].apply(_tier)
+
+    # Drop bloat columns
+    drop_cols = [
+        "detailed_description", "about_the_game", "header_image", "website",
+        "pc_requirements", "mac_requirements", "linux_requirements",
+        "screenshots", "movies", "background", "content_descriptors",
+        "support_info", "fullgame", "package_groups", "packages",
+        "price_overview", "price",   # replaced by price_usd
+        "release_date",              # replaced by release_year
+    ]
+    df.drop(columns=[c for c in drop_cols if c in df.columns], inplace=True, errors="ignore")
+
+    # Deduplicate on appid
+    if "appid" in df.columns:
+        df.drop_duplicates(subset=["appid"], keep="first", inplace=True)
+    df.reset_index(drop=True, inplace=True)
 
     return df
 
 
-# ── column introspection helpers ──────────────────────────────────────────────
+# ── schema helper ──────────────────────────────────────────────────────────────
 
 def get_schema_info(conn: sqlite3.Connection) -> dict:
-    """Return column names and sample values for the games table."""
     cur = conn.execute("PRAGMA table_info(games)")
     cols = [row[1] for row in cur.fetchall()]
     sample = pd.read_sql("SELECT * FROM games LIMIT 3", conn)
