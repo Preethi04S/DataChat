@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>NEXUS – Game Analytics</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+  <style>
+    :root {
+      --bg: #0a0a1a;
+      --glass-bg: rgba(255,255,255,0.06);
+      --glass-border: rgba(255,255,255,0.12);
+      --accent: #6c63ff;
+      --accent2: #00d4ff;
+      --green: #00ff88;
+      --text: #e8eaf6;
+      --muted: #8892a4;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* Background orbs */
+    body::before, body::after {
+      content: '';
+      position: fixed;
+      border-radius: 50%;
+      filter: blur(120px);
+      opacity: 0.12;
+      pointer-events: none;
+      z-index: 0;
+    }
+    body::before { width: 600px; height: 600px; background: var(--accent); top: -200px; left: -200px; }
+    body::after  { width: 500px; height: 500px; background: var(--accent2); bottom: -150px; right: -150px; }
+
+    header {
+      position: relative; z-index: 1;
+      padding: 1.2rem 2rem;
+      border-bottom: 1px solid var(--glass-border);
+      background: var(--glass-bg);
+      backdrop-filter: blur(16px);
+      display: flex; align-items: center; justify-content: space-between;
+    }
+    header h1 { font-size: 1.4rem; letter-spacing: .05em; color: var(--accent); }
+    header span { font-size: .8rem; color: var(--muted); }
+
+    .container { display: flex; flex: 1; position: relative; z-index: 1; gap: 0; }
+
+    /* History sidebar */
+    #sidebar {
+      width: 260px; min-width: 220px;
+      border-right: 1px solid var(--glass-border);
+      padding: 1rem;
+      overflow-y: auto;
+      background: rgba(0,0,0,0.2);
+    }
+    #sidebar h3 { font-size: .8rem; color: var(--muted); text-transform: uppercase; letter-spacing: .1em; margin-bottom: .8rem; }
+    .history-item {
+      padding: .5rem .7rem;
+      border-radius: 8px;
+      margin-bottom: .4rem;
+      cursor: pointer;
+      font-size: .82rem;
+      color: var(--muted);
+      border: 1px solid transparent;
+      transition: all .2s;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .history-item:hover { border-color: var(--accent); color: var(--text); background: var(--glass-bg); }
+
+    /* Main panel */
+    main { flex: 1; display: flex; flex-direction: column; padding: 1.5rem; gap: 1rem; }
+
+    .glass {
+      background: var(--glass-bg);
+      border: 1px solid var(--glass-border);
+      border-radius: 16px;
+      backdrop-filter: blur(12px);
+    }
+
+    /* Query area */
+    #query-box { padding: 1rem; }
+    #query-box label { display: block; font-size: .8rem; color: var(--muted); margin-bottom: .5rem; text-transform: uppercase; letter-spacing: .08em; }
+    .query-row { display: flex; gap: .6rem; }
+    #query-input {
+      flex: 1; padding: .75rem 1rem;
+      background: rgba(0,0,0,0.3);
+      border: 1px solid var(--glass-border);
+      border-radius: 10px;
+      color: var(--text);
+      font-size: 1rem;
+      font-family: 'Courier New', monospace;
+      outline: none;
+      transition: border-color .2s;
+    }
+    #query-input:focus { border-color: var(--accent); }
+    #ask-btn {
+      padding: .75rem 1.6rem;
+      background: linear-gradient(135deg, var(--accent), var(--accent2));
+      border: none; border-radius: 10px;
+      color: #fff; font-size: 1rem; font-weight: 600;
+      cursor: pointer; transition: opacity .2s;
+    }
+    #ask-btn:hover { opacity: .85; }
+    #ask-btn:disabled { opacity: .4; cursor: not-allowed; }
+
+    /* Quick queries */
+    .quick-queries { display: flex; flex-wrap: wrap; gap: .4rem; margin-top: .7rem; }
+    .quick-chip {
+      padding: .3rem .7rem;
+      border-radius: 20px;
+      border: 1px solid var(--glass-border);
+      font-size: .75rem; color: var(--muted); cursor: pointer;
+      transition: all .2s;
+    }
+    .quick-chip:hover { border-color: var(--accent); color: var(--accent); }
+
+    /* Response area */
+    #response-area { padding: 1.2rem; flex: 1; }
+    #response-area h3 { font-size: .8rem; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; margin-bottom: .8rem; }
+    #response-text {
+      font-size: 1rem; line-height: 1.7;
+      min-height: 60px;
+      white-space: pre-wrap;
+    }
+    .loading { color: var(--accent2); animation: pulse 1s infinite; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+
+    /* Metadata cards */
+    #meta-row { display: flex; gap: 1rem; flex-wrap: wrap; }
+    .meta-card {
+      flex: 1; min-width: 140px;
+      padding: .9rem 1rem;
+      border-radius: 12px;
+      background: var(--glass-bg);
+      border: 1px solid var(--glass-border);
+    }
+    .meta-card .label { font-size: .72rem; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; }
+    .meta-card .value { font-size: 1.3rem; font-weight: 700; margin-top: .2rem; color: var(--accent2); }
+
+    /* Results table */
+    #results-table-wrap { overflow-x: auto; max-height: 280px; }
+    table { width: 100%; border-collapse: collapse; font-size: .82rem; }
+    th { padding: .5rem .7rem; text-align: left; color: var(--muted); border-bottom: 1px solid var(--glass-border); font-weight: 500; }
+    td { padding: .45rem .7rem; border-bottom: 1px solid rgba(255,255,255,0.04); }
+    tr:hover td { background: rgba(108,99,255,0.08); }
+
+    /* Confidence meter */
+    .conf-bar-wrap { height: 6px; background: rgba(255,255,255,0.1); border-radius: 3px; overflow: hidden; margin-top: .4rem; }
+    .conf-bar { height: 100%; border-radius: 3px; transition: width .5s; }
+
+    #status-bar { font-size: .75rem; color: var(--muted); padding: .4rem 1rem; border-top: 1px solid var(--glass-border); background: rgba(0,0,0,.2); }
+
+    /* Intent badge */
+    .badge {
+      display: inline-block; padding: .15rem .55rem;
+      border-radius: 20px; font-size: .72rem; font-weight: 600;
+      text-transform: uppercase; letter-spacing: .06em;
+    }
+    .badge-currency   { background: rgba(0,212,255,.15); color: var(--accent2); }
+    .badge-statistics { background: rgba(0,255,136,.15); color: var(--green); }
+    .badge-filter     { background: rgba(108,99,255,.2); color: var(--accent); }
+    .badge-comparison { background: rgba(255,170,0,.15); color: #ffaa00; }
+    .badge-trend      { background: rgba(255,80,120,.15); color: #ff5078; }
+    .badge-lookup     { background: rgba(200,200,200,.1); color: var(--muted); }
+    .badge-irrelevant { background: rgba(255,80,80,.1); color: #ff5050; }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>⬡ NEXUS &nbsp;Game Analytics</h1>
+  <span id="header-status">Loading dataset…</span>
+</header>
+
+<div class="container">
+  <!-- Sidebar history -->
+  <div id="sidebar">
+    <h3>Query History</h3>
+    <div id="history-list"></div>
+  </div>
+
+  <!-- Main content -->
+  <main>
+
+    <!-- Query input -->
+    <div class="glass" id="query-box">
+      <label>Ask anything about games</label>
+      <div class="query-row">
+        <input id="query-input" type="text" placeholder="e.g. Do free games have higher ratings?" autocomplete="off"/>
+        <button id="ask-btn" onclick="submitQuery()">Ask →</button>
+      </div>
+      <div class="quick-queries">
+        <span class="quick-chip" onclick="fillQ(this)">Do free games rate higher?</span>
+        <span class="quick-chip" onclick="fillQ(this)">How many Action games support Korean?</span>
+        <span class="quick-chip" onclick="fillQ(this)">Best multiplayer shooters after 2015</span>
+        <span class="quick-chip" onclick="fillQ(this)">Price of Counter-Strike in INR and USD</span>
+        <span class="quick-chip" onclick="fillQ(this)">Top 10 highest rated games</span>
+        <span class="quick-chip" onclick="fillQ(this)">Average price by genre</span>
+      </div>
+    </div>
+
+    <!-- Metadata cards -->
+    <div id="meta-row">
+      <div class="meta-card">
+        <div class="label">Intent</div>
+        <div class="value" id="card-intent">—</div>
+      </div>
+      <div class="meta-card">
+        <div class="label">Confidence</div>
+        <div class="value" id="card-conf">—</div>
+        <div class="conf-bar-wrap"><div class="conf-bar" id="conf-bar" style="width:0%;background:#6c63ff"></div></div>
+      </div>
+      <div class="meta-card">
+        <div class="label">Results</div>
+        <div class="value" id="card-results">—</div>
+      </div>
+      <div class="meta-card">
+        <div class="label">Time (ms)</div>
+        <div class="value" id="card-time">—</div>
+      </div>
+    </div>
+
+    <!-- Response -->
+    <div class="glass" id="response-area">
+      <h3>Answer</h3>
+      <div id="response-text" style="color:var(--muted)">Ask a question above to get started.</div>
+    </div>
+
+    <!-- Results table -->
+    <div class="glass" style="padding:1rem;" id="table-box">
+      <h3 style="font-size:.8rem;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin-bottom:.6rem;">Game Data</h3>
+      <div id="results-table-wrap"><em style="color:var(--muted);font-size:.85rem;">No data yet.</em></div>
+    </div>
+
+  </main>
+</div>
+
+<div id="status-bar">NEXUS ready • POST /game/analytics</div>
+
+<script>
+  let sessionId = null;
+  const historyQueries = [];
+
+  async function checkHealth() {
+    try {
+      const r = await fetch('/health');
+      const d = await r.json();
+      const total = d.dataset?.total_games ?? '?';
+      document.getElementById('header-status').textContent = `${total} games loaded`;
+    } catch(e) {
+      document.getElementById('header-status').textContent = 'Server unreachable';
+    }
+  }
+  checkHealth();
+
+  function fillQ(el) {
+    document.getElementById('query-input').value = el.textContent;
+  }
+
+  document.getElementById('query-input').addEventListener('keydown', e => {
+    if (e.key === 'Enter') submitQuery();
+  });
+
+  async function submitQuery() {
+    const q = document.getElementById('query-input').value.trim();
+    if (!q) return;
+
+    document.getElementById('ask-btn').disabled = true;
+    document.getElementById('response-text').textContent = '⏳ Thinking…';
+    document.getElementById('response-text').className = 'loading';
+    document.getElementById('status-bar').textContent = 'Querying NEXUS…';
+
+    const body = { query: q };
+    if (sessionId) body.session_id = sessionId;
+
+    try {
+      const r = await fetch('/game/analytics', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await r.json();
+
+      sessionId = data.metadata?.session_id || sessionId;
+      renderResponse(q, data);
+      addHistory(q);
+
+    } catch(err) {
+      document.getElementById('response-text').textContent = `Error: ${err.message}`;
+    } finally {
+      document.getElementById('ask-btn').disabled = false;
+      document.getElementById('status-bar').textContent = 'NEXUS ready • POST /game/analytics';
+    }
+  }
+
+  function renderResponse(query, data) {
+    const meta = data.metadata || {};
+
+    // Answer
+    const rt = document.getElementById('response-text');
+    rt.textContent = data.response || 'No response.';
+    rt.className = '';
+
+    // Intent badge
+    const intentEl = document.getElementById('card-intent');
+    const intent = meta.query_type || 'unknown';
+    intentEl.innerHTML = `<span class="badge badge-${intent}">${intent}</span>`;
+
+    // Confidence
+    const conf = meta.confidence_score ?? 0;
+    document.getElementById('card-conf').textContent = (conf * 100).toFixed(0) + '%';
+    const bar = document.getElementById('conf-bar');
+    bar.style.width = (conf * 100) + '%';
+    bar.style.background = conf > 0.7 ? '#00ff88' : conf > 0.4 ? '#ffaa00' : '#ff5050';
+
+    // Results
+    document.getElementById('card-results').textContent = meta.total_results ?? (meta.games?.length ?? 0);
+    document.getElementById('card-time').textContent = meta.execution_time_ms ?? '—';
+
+    // Table
+    const games = meta.games || [];
+    renderTable(games);
+  }
+
+  function renderTable(rows) {
+    const wrap = document.getElementById('results-table-wrap');
+    if (!rows || rows.length === 0) {
+      wrap.innerHTML = '<em style="color:var(--muted);font-size:.85rem;">No game records returned.</em>';
+      return;
+    }
+    const keys = Object.keys(rows[0]).slice(0, 10); // cap columns
+    let html = '<table><thead><tr>' + keys.map(k => `<th>${k}</th>`).join('') + '</tr></thead><tbody>';
+    for (const row of rows) {
+      html += '<tr>' + keys.map(k => `<td>${row[k] ?? ''}</td>`).join('') + '</tr>';
+    }
+    html += '</tbody></table>';
+    wrap.innerHTML = html;
+  }
+
+  function addHistory(q) {
+    historyQueries.unshift(q);
+    const list = document.getElementById('history-list');
+    list.innerHTML = historyQueries.slice(0, 20).map(
+      h => `<div class="history-item" title="${h}" onclick="fillQ({textContent:'${h.replace(/'/g,"\\'")}'})">${h}</div>`
+    ).join('');
+  }
+</script>
+</body>
+</html>
