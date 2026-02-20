@@ -76,7 +76,9 @@ Notes:
 - rating is 0-10 scale; higher is better
 - release_year is a float (e.g. 2015.0), filter with release_year > 2015
 - For shooter games released after 2015 with multiplayer use:
-  WHERE (LOWER(tags) LIKE '%shooter%' OR LOWER(tags) LIKE '%fps%') AND has_multiplayer=1 AND release_year > 2015 ORDER BY rating DESC LIMIT 20
+  SELECT appid, name, rating, genre, release_year, price_usd FROM games WHERE (LOWER(tags) LIKE '%shooter%' OR LOWER(tags) LIKE '%fps%') AND has_multiplayer=1 AND release_year > 2015 ORDER BY rating DESC LIMIT 20
+- NEVER use SELECT * — always select only needed columns: appid, name, rating, genre, release_year, price_usd, languages, developer
+- The tags and short_description columns are very long — never select them
 """
 
 # ── Intent classification ─────────────────────────────────────────────────────
@@ -128,7 +130,64 @@ def _extract_currencies(query: str) -> list:
     return found if found else ["USD", "INR"]
 
 
-# ── SQL builder ───────────────────────────────────────────────────────────────
+# ── Smart SQL router: known patterns → reliable SQL; else → LLM ──────────────
+
+FREE_VS_PAID_RE = re.compile(r"\b(free.*paid|paid.*free|free.*higher|free.*rating|free.*rate)\b", re.I)
+ACTION_KOREAN_RE = re.compile(r"\baction\b.*\bkorean\b|\bkorean\b.*\baction\b", re.I)
+SHOOTER_MULTI_RE = re.compile(r"\bshooter\b.*\b(after|since|release|2015|2016|2017|2018|2019|2020)\b", re.I)
+COUNTER_STRIKE_RE = re.compile(r"\bcounter.?strike\b|\bcsgo\b|\bcs:?go\b", re.I)
+
+
+def _smart_sql(query: str, intent: str) -> str:
+    """Use reliable hardcoded SQL for known query patterns; fall back to LLM."""
+    q = query.lower()
+
+    # Pattern 1: free vs paid ratings comparison
+    if FREE_VS_PAID_RE.search(q) or ("free" in q and "paid" in q and "rating" in q):
+        return (
+            "SELECT is_free, "
+            "ROUND(AVG(rating), 2) AS avg_rating, "
+            "COUNT(*) AS game_count "
+            "FROM games WHERE rating IS NOT NULL "
+            "GROUP BY is_free ORDER BY is_free"
+        )
+
+    # Pattern 2: action games with Korean
+    if ACTION_KOREAN_RE.search(q) or ("action" in q and "korean" in q):
+        return (
+            "SELECT COUNT(*) AS count FROM games "
+            "WHERE LOWER(genre) LIKE '%action%' "
+            "AND LOWER(languages) LIKE '%korean%'"
+        )
+
+    # Pattern 3: multiplayer shooters after a year
+    if SHOOTER_MULTI_RE.search(q) or ("shooter" in q and ("after" in q or "2015" in q)):
+        year_match = re.search(r"\b(201[0-9]|202[0-4])\b", q)
+        year = int(year_match.group(1)) if year_match else 2015
+        return (
+            f"SELECT appid, name, rating, genre, release_year, price_usd, developer "
+            f"FROM games "
+            f"WHERE (LOWER(tags) LIKE '%shooter%' OR LOWER(tags) LIKE '%fps%') "
+            f"AND has_multiplayer=1 "
+            f"AND release_year > {year} "
+            f"ORDER BY rating DESC LIMIT 20"
+        )
+
+    # Pattern 4: Counter-Strike price
+    if COUNTER_STRIKE_RE.search(q) or ("counter" in q and ("price" in q or "inr" in q or "usd" in q)):
+        return (
+            "SELECT appid, name, price_usd, developer, genre, rating "
+            "FROM games "
+            "WHERE LOWER(name) LIKE '%counter-strike%' "
+            "OR LOWER(name) LIKE '%counter strike%' "
+            "ORDER BY positive DESC LIMIT 5"
+        )
+
+    # Default: LLM-generated SQL
+    return _build_sql(query, intent)
+
+
+# ── LLM SQL builder (fallback) ────────────────────────────────────────────────
 
 def _build_sql(query: str, intent: str) -> str:
     system = (
@@ -164,7 +223,13 @@ def _build_sql(query: str, intent: str) -> str:
 
 def _generate_answer(query: str, intent: str, rows: list,
                      extra_context: str = "", history_text: str = "") -> str:
-    data_str = json.dumps(rows[:25], default=str) if rows else "No results found."
+    # Strip heavy text columns before serialising to avoid token overflow
+    _heavy = {"tags", "short_description", "detailed_description", "about_the_game", "supported_languages"}
+    clean_rows = [
+        {k: v for k, v in row.items() if k not in _heavy}
+        for row in (rows[:20] if rows else [])
+    ]
+    data_str = json.dumps(clean_rows, default=str) if clean_rows else "No results found."
 
     system = (
         "You are NEXUS, a friendly and precise game analytics assistant for Steam game data.\n"
@@ -228,7 +293,9 @@ def process_query(query: str, conn: sqlite3.Connection,
             "metadata": {
                 "query_type": "irrelevant",
                 "confidence_score": 1.0,
-                "games": [], "statistics": {},
+                "games": [],
+                "total_results": 0,
+                "statistics": {},
                 "session_id": session_id,
                 "execution_time_ms": int((time.time() - t0) * 1000),
             },
@@ -242,8 +309,8 @@ def process_query(query: str, conn: sqlite3.Connection,
     statistics = {}
 
     try:
-        # ── Build + run SQL ───────────────────────────────────────────────────
-        sql_used = _build_sql(query, intent)
+        # ── Reliable pre-built SQL for known query patterns ───────────────────
+        sql_used = _smart_sql(query, intent)
         rows = run_query(conn, sql_used)
 
         if rows and "error" in rows[0]:
