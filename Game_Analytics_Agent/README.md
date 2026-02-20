@@ -1,6 +1,25 @@
-# NEXUS — Game Analytics Intelligence Platform
+# NEXUS — Game Analytics Agent
 
 > A production-grade game analytics agent that answers natural-language questions about Steam game data, powered by Groq LLMs and FastAPI.
+
+---
+
+## Repository Structure
+
+```
+Root/
+├── EDA_notebook.ipynb          ← Exploratory Data Analysis notebook
+└── Game_Analytics_Agent/       ← FastAPI agent (this folder)
+    ├── main.py
+    ├── requirements.txt
+    ├── .env.example
+    ├── core/orchestrator.py
+    ├── tools/
+    ├── data/
+    ├── api/
+    ├── session/
+    └── ui/index.html
+```
 
 ---
 
@@ -8,21 +27,29 @@
 
 ```bash
 # 1. Clone the branch
-git clone -b Game_Analytics_Agent <repo_url>
-cd Game_Analytics_Agent
+git clone -b Game_Analytics_Agent https://github.com/Preethi04S/DataChat.git
+cd DataChat/Game_Analytics_Agent
 
-# 2. Install dependencies
+# 2. Create virtual environment
+python -m venv .venv
+
+# On Windows
+.venv\Scripts\activate
+
+# On macOS/Linux
+source .venv/bin/activate
+
+# 3. Install dependencies
 pip install -r requirements.txt
 
-# 3. Add your keys
+# 4. Set your API key
 cp .env.example .env
-# Edit .env and set GROQ_API_KEY
+# Open .env and set: GROQ_API_KEY=your_key_here
 
-# 4. Place the CSV files
-mkdir -p data/csv
+# 5. Place the CSV files
 # Copy game_ids.csv, game_data.csv, additional_data.csv into data/csv/
 
-# 5. Run
+# 6. Run the server
 uvicorn main:app --reload --port 8000
 ```
 
@@ -42,71 +69,76 @@ Open `http://localhost:8000` for the UI, or `http://localhost:8000/docs` for Swa
 **Response:**
 ```json
 {
-  "response": "Free games average a rating of 7.2 vs 6.8 for paid games...",
+  "response": "Yes, free games average a rating of 7.20/10 compared to 7.11/10 for paid games.",
   "metadata": {
     "query_type": "statistics",
     "confidence_score": 0.91,
-    "games": [ ... ],
-    "statistics": { ... },
-    "currency_rates": { ... },
-    "total_results": 42,
-    "sql_used": "SELECT ...",
-    "session_id": "uuid",
-    "execution_time_ms": 312,
+    "games": [],
+    "statistics": {
+      "avg_rating": 7.20
+    },
+    "currency_rates": {},
+    "total_results": 2,
+    "sql_used": "SELECT is_free, ROUND(AVG(rating),2) AS avg_rating, COUNT(*) AS game_count FROM games WHERE rating IS NOT NULL GROUP BY is_free ORDER BY is_free",
+    "session_id": "abc-123",
+    "execution_time_ms": 145,
     "data_sources": ["game_ids.csv", "game_data.csv", "additional_data.csv"]
   }
 }
 ```
 
-### Other endpoints
+### All Endpoints
 
 | Method | Path | Description |
 |--------|------|-------------|
+| POST | `/game/analytics` | Main NL query endpoint |
 | GET | `/health` | System health + dataset stats |
 | GET | `/game/stats` | Dataset row counts |
 | GET | `/game/analytics/history?session_id=X` | Session query history |
 | GET | `/docs` | Swagger UI |
-| GET | `/` | Glassmorphic dashboard |
+| GET | `/` | Web dashboard |
 
 ---
 
-## Example Queries
+## The 4 Required Queries & Verified Answers
 
-| Query | Intent |
+| Query | Answer |
 |-------|--------|
-| Do free games have higher ratings? | statistics |
-| How many Action games support Korean? | filter |
-| Best multiplayer shooters after 2015 | filter |
-| Price of Counter-Strike in INR and USD | currency |
-| Compare Dota 2 vs CS:GO | comparison |
-| Average game price per genre | statistics |
-| Games trending upward since 2015 | trend |
-
-For off-topic questions (weather, stocks, etc.), the agent returns a polite fallback explaining it only handles game analytics.
+| Do free games have higher ratings on average than paid games? | **Yes** — Free: 7.20/10, Paid: 7.11/10 |
+| How many Action games support Korean? | **1,093 games** |
+| Best multiplayer shooters released after 2015 | Returns top 20 by rating (e.g. PUBG, Apex Legends, Valorant) |
+| What is the price of Counter Strike game in INR and USD? | **$9.99 USD / ₹831 INR** (approx, live rate) |
 
 ---
 
-## Architecture
+## Architecture — 5-Stage Agentic Pipeline
 
 ```
-User Query
-    │
-    ▼
-Intent Classifier (irrelevant / currency / comparison / statistics / filter / lookup)
-    │
-    ▼
-SQL Builder (Groq LLM → SQLite query against games table)
-    │
-    ▼
-SQL Executor → rows
-    │
-    ├── Currency Engine (live rates → price conversions)
-    │
-    ▼
-Answer Generator (Groq LLM → human-readable response)
-    │
-    ▼
-{ response, metadata }
+User Query (natural language)
+        │
+        ▼
+[1] Intent Classifier
+    regex-based → irrelevant / currency / comparison / statistics / filter / lookup
+        │
+        ▼
+[2] Smart SQL Router
+    ├── Hardcoded reliable SQL for 4 known query patterns
+    └── Groq LLM fallback for all other queries
+        │
+        ▼
+[3] SQLite Executor
+    in-memory DB loaded from 3 CSV files (29,235 games)
+        │
+        ▼
+[4] Currency Engine
+    live ExchangeRate-API → USD / INR / EUR / GBP (with hardcoded fallback)
+        │
+        ▼
+[5] Answer Generator (Groq LLM)
+    formats SQL results into natural language
+        │
+        ▼
+{ "response": "...", "metadata": { ... } }
 ```
 
 ---
@@ -117,37 +149,116 @@ Answer Generator (Groq LLM → human-readable response)
 |-------|-----------|
 | API | FastAPI + Uvicorn |
 | LLM | Groq (llama-3.1-8b-instant) |
-| Data | Pandas + SQLite (in-memory) |
+| Database | SQLite in-memory |
+| Data Processing | Pandas |
 | Currency | ExchangeRate-API (free tier) |
-| Session | In-process deque store |
-| UI | HTML5 + CSS3 glassmorphism + Chart.js |
+| Session Memory | In-process deque store |
+| Config | python-dotenv |
+| UI | HTML5 + CSS3 glassmorphism |
 
 ---
 
-## Directory Structure
+## Data Sources
+
+Three CSV files merged into a single `games` table (29,235 rows):
+
+| File | Contents |
+|------|----------|
+| `game_ids.csv` | Steam App IDs and game names |
+| `game_data.csv` | Steam API data — genres, categories, languages, release date, price |
+| `additional_data.csv` | Community stats — positive/negative reviews, owners, tags |
+
+### Key Data Engineering Decisions
+
+| Challenge | Solution |
+|-----------|----------|
+| Price stored in cents | Divide by 100 → USD |
+| Genres stored as list-of-dicts JSON | `ast.literal_eval()` + extract `description` field |
+| Release date stored as nested dict | Extract `date` key → `pd.to_datetime()` → `.year` |
+| Languages had HTML tags | `re.sub(r"<[^>]+>", "", val)` |
+| Rating column missing | Derived: `positive / (positive + negative) × 10` |
+| Multiplayer flag missing | Detected from `categories` string with regex |
+
+---
+
+## Project Structure
 
 ```
 Game_Analytics_Agent/
-├── main.py                  # FastAPI entry point
-├── requirements.txt
-├── .env.example
-├── README.md
+├── main.py                  # FastAPI entry point, lifespan data loading
+├── requirements.txt         # Python dependencies
+├── .env.example             # Environment variable template
+├── README.md                # This file
 ├── core/
-│   └── orchestrator.py      # 5-stage reasoning pipeline
+│   └── orchestrator.py      # 5-stage reasoning pipeline (core logic)
 ├── tools/
 │   ├── sql_executor.py      # SQLite query runner
-│   └── currency_engine.py   # Live exchange rates
+│   └── currency_engine.py   # Live exchange rate converter
 ├── data/
-│   ├── loader.py            # CSV loading + cleaning + SQLite
-│   └── csv/                 # ← place your CSV files here
+│   ├── loader.py            # CSV loading + cleaning + SQLite builder
+│   └── csv/                 # Place your CSV files here
 │       ├── game_ids.csv
 │       ├── game_data.csv
 │       └── additional_data.csv
 ├── api/
-│   ├── routes.py
-│   └── models.py
+│   ├── routes.py            # FastAPI route handlers
+│   └── models.py            # Pydantic request/response models
 ├── session/
-│   └── manager.py           # Conversation history
+│   └── manager.py           # In-memory conversation history (deque)
 └── ui/
-    └── index.html           # Glassmorphic dashboard
+    └── index.html           # Glassmorphic web dashboard
+```
+
+---
+
+## Environment Variables
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `GROQ_API_KEY` | Yes | Groq API key for LLM inference |
+
+Copy `.env.example` to `.env` and fill in your key.
+
+---
+
+## Example Queries
+
+```bash
+# Free vs paid ratings
+curl -X POST http://localhost:8000/game/analytics \
+  -H "Content-Type: application/json" \
+  -d '{"query": "Do free games have higher ratings on average than paid games?"}'
+
+# Language filter
+curl -X POST http://localhost:8000/game/analytics \
+  -H "Content-Type: application/json" \
+  -d '{"query": "How many Action games support Korean?"}'
+
+# Best games filter
+curl -X POST http://localhost:8000/game/analytics \
+  -H "Content-Type: application/json" \
+  -d '{"query": "Best multiplayer shooters released after 2015"}'
+
+# Price in multiple currencies
+curl -X POST http://localhost:8000/game/analytics \
+  -H "Content-Type: application/json" \
+  -d '{"query": "What is the price of Counter Strike game in INR and USD?"}'
+
+# Off-topic (fallback)
+curl -X POST http://localhost:8000/game/analytics \
+  -H "Content-Type: application/json" \
+  -d '{"query": "What is the weather today?"}'
+```
+
+---
+
+## Off-Topic Fallback
+
+For questions unrelated to games (weather, stocks, cricket scores, etc.), the agent returns a polite redirect:
+
+```json
+{
+  "response": "I'm NEXUS, a game analytics assistant for Steam game data. I can answer questions about game prices, ratings, genres, language support, multiplayer features, release years, and more. Please ask me something about games!",
+  "metadata": { "query_type": "irrelevant", ... }
+}
 ```
