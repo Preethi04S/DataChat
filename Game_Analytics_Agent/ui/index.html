@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>NEXUS – Game Analytics</title>
+  <style>
+    :root {
+      --bg: #0d0d1f;
+      --glass: rgba(255,255,255,0.05);
+      --border: rgba(255,255,255,0.10);
+      --accent: #6c63ff;
+      --cyan: #00d4ff;
+      --green: #00ff88;
+      --orange: #ffaa00;
+      --red: #ff5078;
+      --text: #e8eaf6;
+      --muted: #7a849a;
+      --code-bg: #0a0a18;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', system-ui, sans-serif; min-height: 100vh; }
+
+    /* ── Header ── */
+    header {
+      padding: 1rem 2rem; display: flex; align-items: center; justify-content: space-between;
+      background: rgba(0,0,0,0.3); border-bottom: 1px solid var(--border);
+      position: sticky; top: 0; z-index: 100; backdrop-filter: blur(12px);
+    }
+    header h1 { font-size: 1.3rem; color: var(--accent); letter-spacing: .04em; }
+    #hstatus { font-size: .78rem; color: var(--muted); }
+
+    /* ── Layout ── */
+    .layout { display: flex; height: calc(100vh - 57px); }
+
+    /* Sidebar */
+    #sidebar {
+      width: 240px; min-width: 200px; border-right: 1px solid var(--border);
+      padding: 1rem .8rem; overflow-y: auto; background: rgba(0,0,0,0.2); flex-shrink: 0;
+    }
+    #sidebar h4 { font-size: .72rem; color: var(--muted); text-transform: uppercase; letter-spacing: .1em; margin-bottom: .8rem; }
+    .hi {
+      padding: .45rem .6rem; border-radius: 8px; margin-bottom: .35rem;
+      cursor: pointer; font-size: .8rem; color: var(--muted);
+      border: 1px solid transparent; transition: all .15s;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .hi:hover { border-color: var(--accent); color: var(--text); background: var(--glass); }
+
+    /* Main */
+    main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+
+    /* Query box */
+    #qbox {
+      padding: 1rem 1.2rem; border-bottom: 1px solid var(--border);
+      background: rgba(0,0,0,0.2); flex-shrink: 0;
+    }
+    .qrow { display: flex; gap: .5rem; margin-bottom: .6rem; }
+    #qin {
+      flex: 1; padding: .7rem 1rem; background: rgba(0,0,0,0.4);
+      border: 1px solid var(--border); border-radius: 10px;
+      color: var(--text); font-size: .95rem; font-family: 'Courier New', monospace; outline: none;
+    }
+    #qin:focus { border-color: var(--accent); }
+    #abtn {
+      padding: .7rem 1.4rem; background: linear-gradient(135deg, var(--accent), var(--cyan));
+      border: none; border-radius: 10px; color: #fff; font-size: .95rem;
+      font-weight: 600; cursor: pointer; white-space: nowrap;
+    }
+    #abtn:disabled { opacity: .4; cursor: not-allowed; }
+    .chips { display: flex; flex-wrap: wrap; gap: .35rem; }
+    .chip {
+      padding: .25rem .65rem; border-radius: 20px; border: 1px solid var(--border);
+      font-size: .73rem; color: var(--muted); cursor: pointer; transition: all .15s;
+    }
+    .chip:hover { border-color: var(--accent); color: var(--accent); }
+
+    /* Content area — scrollable */
+    #content { flex: 1; overflow-y: auto; padding: 1rem 1.2rem; display: flex; flex-direction: column; gap: 1rem; }
+
+    /* Cards row */
+    .cards { display: flex; gap: .8rem; flex-wrap: wrap; }
+    .card {
+      flex: 1; min-width: 120px; padding: .8rem 1rem;
+      background: var(--glass); border: 1px solid var(--border); border-radius: 12px;
+    }
+    .card .lbl { font-size: .68rem; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; }
+    .card .val { font-size: 1.2rem; font-weight: 700; margin-top: .2rem; color: var(--cyan); }
+    .bar-wrap { height: 5px; background: rgba(255,255,255,0.08); border-radius: 3px; margin-top: .5rem; overflow: hidden; }
+    .bar { height: 100%; border-radius: 3px; transition: width .5s; }
+
+    /* Panel (glass box) */
+    .panel {
+      background: var(--glass); border: 1px solid var(--border); border-radius: 14px; overflow: hidden;
+    }
+    .panel-header {
+      padding: .6rem 1rem; border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; justify-content: space-between;
+      background: rgba(0,0,0,0.2);
+    }
+    .panel-header .ptitle { font-size: .75rem; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; }
+    .panel-body { padding: 1rem; }
+
+    /* Answer text */
+    #answer-text { font-size: .97rem; line-height: 1.75; white-space: pre-wrap; min-height: 50px; }
+    .thinking { color: var(--cyan); animation: pulse 1s infinite; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
+
+    /* JSON viewer */
+    #json-box {
+      background: var(--code-bg); border-radius: 10px; padding: 1rem;
+      font-family: 'Courier New', monospace; font-size: .8rem;
+      line-height: 1.6; overflow-x: auto; max-height: 380px; overflow-y: auto;
+      white-space: pre;
+    }
+    /* JSON syntax colours */
+    .jk { color: #79c0ff; }   /* key */
+    .js { color: #a5d6a7; }   /* string value */
+    .jn { color: #ffab40; }   /* number */
+    .jb { color: #ce93d8; }   /* bool/null */
+    .jp { color: var(--muted); } /* punctuation */
+
+    /* Copy button */
+    .copy-btn {
+      padding: .25rem .7rem; background: rgba(255,255,255,0.07); border: 1px solid var(--border);
+      border-radius: 6px; color: var(--muted); font-size: .72rem; cursor: pointer;
+    }
+    .copy-btn:hover { color: var(--text); background: rgba(255,255,255,0.12); }
+
+    /* Table */
+    .tbl-wrap { overflow-x: auto; max-height: 300px; border-radius: 10px; background: var(--code-bg); }
+    table { width: 100%; border-collapse: collapse; font-size: .78rem; }
+    th { padding: .5rem .7rem; text-align: left; color: var(--muted); border-bottom: 1px solid var(--border);
+         font-weight: 500; position: sticky; top: 0; background: #0f0f25; }
+    td { padding: .4rem .7rem; border-bottom: 1px solid rgba(255,255,255,0.04); color: var(--text); }
+    tr:hover td { background: rgba(108,99,255,0.07); }
+
+    /* Badge */
+    .badge { display:inline-block; padding:.15rem .55rem; border-radius:20px; font-size:.7rem; font-weight:700; text-transform:uppercase; }
+    .b-comparison { background:rgba(255,170,0,.15); color:var(--orange); }
+    .b-statistics  { background:rgba(0,255,136,.12); color:var(--green); }
+    .b-filter      { background:rgba(108,99,255,.18); color:var(--accent); }
+    .b-currency    { background:rgba(0,212,255,.12); color:var(--cyan); }
+    .b-trend       { background:rgba(255,80,120,.12); color:var(--red); }
+    .b-lookup      { background:rgba(150,150,150,.1); color:var(--muted); }
+    .b-irrelevant  { background:rgba(255,80,80,.1); color:var(--red); }
+
+    /* Tabs */
+    .tabs { display:flex; gap:.5rem; }
+    .tab {
+      padding:.3rem .8rem; border-radius:8px; font-size:.75rem; cursor:pointer;
+      border:1px solid var(--border); color:var(--muted); transition:all .15s;
+    }
+    .tab.active { border-color:var(--accent); color:var(--accent); background:rgba(108,99,255,.1); }
+    .tab-content { display:none; }
+    .tab-content.active { display:block; }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>⬡ NEXUS &nbsp;<span style="font-weight:300;color:var(--muted)">Game Analytics</span></h1>
+  <span id="hstatus">Connecting…</span>
+</header>
+
+<div class="layout">
+
+  <!-- Sidebar -->
+  <div id="sidebar">
+    <h4>History</h4>
+    <div id="hlist"></div>
+  </div>
+
+  <!-- Main -->
+  <main>
+
+    <!-- Query -->
+    <div id="qbox">
+      <div class="qrow">
+        <input id="qin" type="text" placeholder="Ask anything about games…" autocomplete="off"/>
+        <button id="abtn" onclick="ask()">Ask →</button>
+      </div>
+      <div class="chips">
+        <span class="chip" onclick="set(this)">Do free games rate higher than paid?</span>
+        <span class="chip" onclick="set(this)">How many Action games support Korean?</span>
+        <span class="chip" onclick="set(this)">Best multiplayer shooters released after 2015</span>
+        <span class="chip" onclick="set(this)">Price of Counter-Strike in INR and USD</span>
+        <span class="chip" onclick="set(this)">Top 10 highest rated games</span>
+        <span class="chip" onclick="set(this)">Average price per genre</span>
+      </div>
+    </div>
+
+    <!-- Scrollable content -->
+    <div id="content">
+
+      <!-- Stat cards -->
+      <div class="cards">
+        <div class="card">
+          <div class="lbl">Intent</div>
+          <div class="val" id="c-intent">—</div>
+        </div>
+        <div class="card">
+          <div class="lbl">Confidence</div>
+          <div class="val" id="c-conf">—</div>
+          <div class="bar-wrap"><div class="bar" id="c-bar" style="width:0%"></div></div>
+        </div>
+        <div class="card">
+          <div class="lbl">Results</div>
+          <div class="val" id="c-res">—</div>
+        </div>
+        <div class="card">
+          <div class="lbl">Time (ms)</div>
+          <div class="val" id="c-time">—</div>
+        </div>
+      </div>
+
+      <!-- Answer -->
+      <div class="panel">
+        <div class="panel-header">
+          <span class="ptitle">Answer</span>
+        </div>
+        <div class="panel-body">
+          <div id="answer-text" style="color:var(--muted)">Ask a question to get started.</div>
+        </div>
+      </div>
+
+      <!-- Metadata + Table tabs -->
+      <div class="panel">
+        <div class="panel-header">
+          <div class="tabs">
+            <div class="tab active" onclick="switchTab('json')">📋 Full JSON Response</div>
+            <div class="tab" onclick="switchTab('table')">📊 Game Data Table</div>
+            <div class="tab" onclick="switchTab('sql')">🔍 SQL Used</div>
+          </div>
+          <button class="copy-btn" onclick="copyJSON()">Copy JSON</button>
+        </div>
+        <div class="panel-body" style="padding:.8rem">
+
+          <!-- JSON tab -->
+          <div id="tab-json" class="tab-content active">
+            <div id="json-box" style="color:var(--muted);font-family:'Courier New',monospace;font-size:.82rem;">
+              Waiting for query…
+            </div>
+          </div>
+
+          <!-- Table tab -->
+          <div id="tab-table" class="tab-content">
+            <div class="tbl-wrap">
+              <div id="tbl-inner" style="padding:1rem;color:var(--muted);font-size:.85rem;">No data yet.</div>
+            </div>
+          </div>
+
+          <!-- SQL tab -->
+          <div id="tab-sql" class="tab-content">
+            <div id="sql-box" style="background:var(--code-bg);border-radius:10px;padding:1rem;
+              font-family:'Courier New',monospace;font-size:.82rem;color:#79c0ff;white-space:pre-wrap;">
+              No SQL yet.
+            </div>
+          </div>
+
+        </div>
+      </div>
+
+    </div><!-- /content -->
+  </main>
+</div>
+
+<script>
+let sessionId = null;
+let lastRaw   = null;
+const hist    = [];
+
+// ── Health check ─────────────────────────────────────────────────────────────
+async function checkHealth() {
+  try {
+    const d = await fetch('/health').then(r => r.json());
+    document.getElementById('hstatus').textContent =
+      `${d.dataset?.total_games?.toLocaleString() ?? '?'} games loaded`;
+  } catch {
+    document.getElementById('hstatus').textContent = 'Server not reachable';
+  }
+}
+checkHealth();
+
+// ── Input helpers ─────────────────────────────────────────────────────────────
+function set(el) { document.getElementById('qin').value = el.textContent.trim(); }
+document.getElementById('qin').addEventListener('keydown', e => { if (e.key==='Enter') ask(); });
+
+// ── Submit query ──────────────────────────────────────────────────────────────
+async function ask() {
+  const q = document.getElementById('qin').value.trim();
+  if (!q) return;
+
+  document.getElementById('abtn').disabled = true;
+  document.getElementById('answer-text').textContent = '⏳ Thinking…';
+  document.getElementById('answer-text').className = 'thinking';
+  document.getElementById('json-box').textContent = 'Loading…';
+
+  try {
+    const body = { query: q };
+    if (sessionId) body.session_id = sessionId;
+
+    const resp = await fetch('/game/analytics', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = await resp.json();
+    lastRaw = data;
+    sessionId = data.metadata?.session_id || sessionId;
+    render(q, data);
+    addHist(q);
+  } catch(e) {
+    document.getElementById('answer-text').textContent = 'Error: ' + e.message;
+    document.getElementById('answer-text').className = '';
+  } finally {
+    document.getElementById('abtn').disabled = false;
+  }
+}
+
+// ── Render response ───────────────────────────────────────────────────────────
+function render(q, data) {
+  const meta = data.metadata || {};
+
+  // Answer
+  const at = document.getElementById('answer-text');
+  at.textContent = data.response || 'No response.';
+  at.className = '';
+
+  // Cards
+  const intent = meta.query_type || 'unknown';
+  document.getElementById('c-intent').innerHTML =
+    `<span class="badge b-${intent}">${intent}</span>`;
+
+  const conf = meta.confidence_score ?? 0;
+  document.getElementById('c-conf').textContent = Math.round(conf * 100) + '%';
+  const bar = document.getElementById('c-bar');
+  bar.style.width = (conf * 100) + '%';
+  bar.style.background = conf > 0.7 ? '#00ff88' : conf > 0.4 ? '#ffaa00' : '#ff5078';
+
+  document.getElementById('c-res').textContent  = (meta.total_results ?? meta.games?.length ?? 0).toLocaleString();
+  document.getElementById('c-time').textContent = meta.execution_time_ms ?? '—';
+
+  // JSON tab — pretty + syntax highlighted
+  document.getElementById('json-box').innerHTML = syntaxHL(JSON.stringify(data, null, 2));
+
+  // Table tab
+  renderTable(meta.games || []);
+
+  // SQL tab
+  document.getElementById('sql-box').textContent = meta.sql_used || 'No SQL used.';
+}
+
+// ── Syntax highlight JSON ─────────────────────────────────────────────────────
+function syntaxHL(json) {
+  return json
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/("(\\u[a-fA-F0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g, m => {
+      let cls = 'jn';
+      if (/^"/.test(m)) {
+        cls = /:$/.test(m) ? 'jk' : 'js';
+      } else if (/true|false/.test(m)) {
+        cls = 'jb';
+      } else if (/null/.test(m)) {
+        cls = 'jb';
+      }
+      return `<span class="${cls}">${m}</span>`;
+    });
+}
+
+// ── Game data table ───────────────────────────────────────────────────────────
+function renderTable(rows) {
+  const wrap = document.getElementById('tbl-inner');
+  if (!rows || rows.length === 0) {
+    wrap.innerHTML = '<em style="color:var(--muted)">No game records in this response.</em>';
+    return;
+  }
+  // Pick most useful columns
+  const preferred = ['name','genre','rating','price_usd','release_year','developer','languages','has_multiplayer','is_free','owners'];
+  const allKeys = Object.keys(rows[0]);
+  const keys = preferred.filter(k => allKeys.includes(k));
+  // Add any remaining keys not in preferred (up to 12 total)
+  allKeys.forEach(k => { if (!keys.includes(k) && keys.length < 12) keys.push(k); });
+
+  let html = '<table><thead><tr>' + keys.map(k => `<th>${k}</th>`).join('') + '</tr></thead><tbody>';
+  for (const row of rows) {
+    html += '<tr>' + keys.map(k => {
+      let v = row[k] ?? '';
+      // Format numbers
+      if (k === 'price_usd') v = v !== '' ? '$' + Number(v).toFixed(2) : '—';
+      if (k === 'rating')    v = v !== '' ? Number(v).toFixed(2) : '—';
+      if (k === 'is_free')   v = v == 1 ? '✓ Free' : 'Paid';
+      if (k === 'has_multiplayer') v = v == 1 ? '✓' : '—';
+      // Truncate long strings
+      if (typeof v === 'string' && v.length > 60) v = v.slice(0, 58) + '…';
+      return `<td>${v}</td>`;
+    }).join('') + '</tr>';
+  }
+  html += '</tbody></table>';
+  wrap.innerHTML = html;
+}
+
+// ── Tab switching ─────────────────────────────────────────────────────────────
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach((t, i) => {
+    const names = ['json','table','sql'];
+    t.classList.toggle('active', names[i] === name);
+  });
+  document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.add('active');
+}
+
+// ── Copy JSON ─────────────────────────────────────────────────────────────────
+function copyJSON() {
+  if (!lastRaw) return;
+  navigator.clipboard.writeText(JSON.stringify(lastRaw, null, 2))
+    .then(() => { const b = document.querySelector('.copy-btn'); b.textContent = 'Copied!'; setTimeout(() => b.textContent = 'Copy JSON', 1500); });
+}
+
+// ── History ───────────────────────────────────────────────────────────────────
+function addHist(q) {
+  hist.unshift(q);
+  document.getElementById('hlist').innerHTML = hist.slice(0, 30).map(
+    h => `<div class="hi" title="${h}" onclick="document.getElementById('qin').value='${h.replace(/'/g,"\\'")}'">${h}</div>`
+  ).join('');
+}
+</script>
+</body>
+</html>
