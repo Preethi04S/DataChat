@@ -4,6 +4,9 @@ Entry point: uvicorn main:app --reload --port 8000
 """
 import os
 from contextlib import asynccontextmanager
+from dotenv import load_dotenv
+
+load_dotenv()  # loads .env from the project root automatically
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware

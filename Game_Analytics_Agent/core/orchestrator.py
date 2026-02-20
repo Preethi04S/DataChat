@@ -1,12 +1,13 @@
 """
-NEXUS Orchestrator – the core reasoning pipeline.
+NEXUS Orchestrator – core reasoning pipeline.
 
 Flow:
   1. Classify intent
-  2. Build SQL / detect currency need
+  2. Build SQL (LLM-assisted, with rich schema context)
   3. Execute SQL
-  4. Format results + call Groq LLM for natural-language answer
-  5. Return structured response dict
+  4. Currency conversion if needed
+  5. LLM generates natural-language answer from data
+  6. Return { response, metadata }
 """
 import os
 import re
@@ -17,12 +18,11 @@ import pandas as pd
 
 from groq import Groq
 from tools.sql_executor import run_query, get_table_stats
-from tools.currency_engine import convert_price, convert_multiple, get_rates
+from tools.currency_engine import convert_multiple
 from session.manager import history_as_text, add_turn, new_session
-from data.loader import get_schema_info
 
-# ── Groq client (lazy) ────────────────────────────────────────────────────────
-_groq_client: Groq | None = None
+# ── Groq client ───────────────────────────────────────────────────────────────
+_groq_client = None
 
 def _groq() -> Groq:
     global _groq_client
@@ -30,255 +30,286 @@ def _groq() -> Groq:
         _groq_client = Groq(api_key=os.environ["GROQ_API_KEY"])
     return _groq_client
 
-
 MODEL = "llama-3.1-8b-instant"
 
-# ── Intent keywords ───────────────────────────────────────────────────────────
-CURRENCY_PATTERNS = re.compile(
-    r"\b(price|cost|how much|inr|usd|eur|gbp|jpy|brl|rupee|dollar|euro|yen|currency|convert)\b",
-    re.I,
+# ── Exact schema description sent to LLM ─────────────────────────────────────
+# Derived from actual CSV inspection — prevents hallucinated column names.
+SCHEMA_DESCRIPTION = """
+Table: games (SQLite, 29235 rows)
+
+Key columns:
+  appid           INTEGER  -- Steam app ID
+  name            TEXT     -- Game name
+  developer       TEXT     -- Developer name
+  publisher       TEXT     -- Publisher name
+  price_usd       REAL     -- Price in USD (0.0 = free)
+  is_free         INTEGER  -- 1 if free, 0 if paid
+  price_tier      TEXT     -- 'Free', 'Budget (<$5)', 'Mid ($5-$20)', 'Premium ($20+)'
+  positive        REAL     -- Number of positive reviews
+  negative        REAL     -- Number of negative reviews
+  rating          REAL     -- Positive ratio * 10, range 0-10 (higher = better)
+  userscore       REAL     -- User score
+  owners          TEXT     -- Owners range string e.g. '10,000,000 .. 20,000,000'
+  owners_estimate REAL     -- Midpoint of owners range
+  languages       TEXT     -- Comma-separated supported languages e.g. 'English, Korean, French'
+  genre           TEXT     -- Comma-separated genres e.g. 'Action', 'Action,Indie'
+  genres          TEXT     -- Parsed genre string from Steam (same as genre)
+  categories      TEXT     -- Game features e.g. 'Multi-player, Online Multi-Player'
+  has_multiplayer INTEGER  -- 1 if multiplayer, 0 if not
+  release_year    REAL     -- Year released e.g. 2015.0
+  ccu             REAL     -- Concurrent users peak
+  tags            TEXT     -- JSON-like dict of tag counts e.g. "{'Action': 2681, 'FPS': 2048}"
+  score_rank      REAL     -- Score rank
+  average_forever REAL     -- Average playtime forever (minutes)
+  discount        REAL     -- Current discount percent
+  short_description TEXT   -- Short description of the game
+
+Notes:
+- Use LOWER(languages) LIKE '%korean%' to filter by Korean language support
+- Use LOWER(genre) LIKE '%action%' to filter by genre (genre has values like 'Action', 'Action,Indie')
+- Use LOWER(tags) LIKE '%shooter%' OR LOWER(tags) LIKE '%fps%' to find shooter games
+- Use LOWER(tags) LIKE '%rpg%' to find RPG games
+- Use has_multiplayer=1 OR LOWER(categories) LIKE '%multi-player%' to filter multiplayer games
+- Use LOWER(name) LIKE '%counter-strike%' OR LOWER(name) LIKE '%counter strike%' for Counter-Strike
+- price_usd is in dollars (e.g. 9.99), NOT cents
+- is_free=1 means free, is_free=0 means paid
+- rating is 0-10 scale; higher is better
+- release_year is a float (e.g. 2015.0), filter with release_year > 2015
+- For shooter games released after 2015 with multiplayer use:
+  WHERE (LOWER(tags) LIKE '%shooter%' OR LOWER(tags) LIKE '%fps%') AND has_multiplayer=1 AND release_year > 2015 ORDER BY rating DESC LIMIT 20
+"""
+
+# ── Intent classification ─────────────────────────────────────────────────────
+CURRENCY_RE   = re.compile(r"\b(price|cost|how much|inr|usd|eur|gbp|jpy|brl|rupee|dollar|euro|yen|currency)\b", re.I)
+COMPARISON_RE = re.compile(r"\b(compare|vs|versus|difference|between|higher|lower|more|less)\b", re.I)
+TREND_RE      = re.compile(r"\b(trend|over time|year|growth|change|history|since|from \d{4})\b", re.I)
+STAT_RE       = re.compile(r"\b(average|mean|count|total|how many|percent|ratio)\b", re.I)
+FILTER_RE     = re.compile(r"\b(list|show|find|top|best|worst|search|support|having|with|after|before)\b", re.I)
+IRRELEVANT_RE = re.compile(
+    r"\b(weather|stock market|crypto|bitcoin|recipe|cooking|politics|president|"
+    r"actor|singer|song lyrics|medical|legal advice|sports score|cricket score)\b", re.I
 )
-COMPARISON_PATTERNS = re.compile(r"\b(compare|vs|versus|difference|between)\b", re.I)
-TREND_PATTERNS      = re.compile(r"\b(trend|over time|year|growth|change|history)\b", re.I)
-FILTER_PATTERNS     = re.compile(
-    r"\b(list|show|find|give|top|best|worst|filter|search|games? (that|with|support|having))\b",
-    re.I,
-)
-STAT_PATTERNS       = re.compile(r"\b(average|mean|count|total|how many|percent|ratio|more|higher|lower)\b", re.I)
-IRRELEVANT_TOPICS   = re.compile(
-    r"\b(weather|stock|crypto|bitcoin|recipe|cook|news|sport(?:s)?|football|cricket|movie(?:s)?|"
-    r"politic(?:s)?|president|actor|singer|song|music|book(?:s)?|health|medical|legal|law)\b",
-    re.I,
-)
+GAME_KW = {"game", "steam", "play", "genre", "rating", "price", "developer", "publisher",
+            "shooter", "rpg", "indie", "action", "multiplayer", "release"}
 
 
 def classify_intent(query: str) -> str:
-    q = query.lower()
-    if IRRELEVANT_TOPICS.search(q) and not any(
-        kw in q for kw in ["game", "steam", "play", "genre", "rating"]
-    ):
+    q_lower = query.lower()
+    # Irrelevant only if NO game keywords present
+    if IRRELEVANT_RE.search(q_lower) and not any(kw in q_lower for kw in GAME_KW):
         return "irrelevant"
-    if CURRENCY_PATTERNS.search(q):
+    if CURRENCY_RE.search(q_lower):
         return "currency"
-    if COMPARISON_PATTERNS.search(q):
+    if COMPARISON_RE.search(q_lower) and STAT_RE.search(q_lower):
         return "comparison"
-    if TREND_PATTERNS.search(q):
+    if TREND_RE.search(q_lower):
         return "trend"
-    if STAT_PATTERNS.search(q):
+    if STAT_RE.search(q_lower):
         return "statistics"
-    if FILTER_PATTERNS.search(q):
+    if FILTER_RE.search(q_lower):
         return "filter"
     return "lookup"
 
 
-# ── Currency detection ─────────────────────────────────────────────────────────
-CURRENCY_CODES = ["USD", "INR", "EUR", "GBP", "JPY", "BRL", "AUD", "CAD", "SGD", "MXN"]
-CURRENCY_WORDS = {
-    "dollar": "USD", "rupee": "INR", "euro": "EUR", "pound": "GBP",
-    "yen": "JPY", "real": "BRL",
-}
+# ── Currency helpers ──────────────────────────────────────────────────────────
+CURRENCY_CODES = ["USD", "INR", "EUR", "GBP", "JPY", "BRL", "AUD", "CAD"]
+CURRENCY_WORDS = {"dollar": "USD", "rupee": "INR", "euro": "EUR",
+                  "pound": "GBP", "yen": "JPY", "real": "BRL"}
 
-def _extract_currencies(query: str) -> list[str]:
+def _extract_currencies(query: str) -> list:
     found = []
-    q_upper = query.upper()
+    q_up = query.upper()
     for code in CURRENCY_CODES:
-        if code in q_upper:
+        if code in q_up:
             found.append(code)
     for word, code in CURRENCY_WORDS.items():
         if word in query.lower() and code not in found:
             found.append(code)
-    return found if found else ["USD"]
+    return found if found else ["USD", "INR"]
 
 
-# ── SQL builder (LLM-assisted) ────────────────────────────────────────────────
+# ── SQL builder ───────────────────────────────────────────────────────────────
 
-def _build_sql(query: str, schema: dict, intent: str) -> str:
-    """Ask the LLM to write SQLite SQL for this query."""
-    cols = schema["columns"]
-    col_info = ", ".join(cols[:40])  # cap to avoid huge prompt
-
+def _build_sql(query: str, intent: str) -> str:
     system = (
-        "You are a SQLite expert. Given the schema and user question, write a single valid "
-        "SQLite SELECT query. The table is named `games`. Only output the raw SQL — no markdown, "
-        "no explanation. Use LOWER() for case-insensitive string comparisons. "
-        "If the user wants a count, use COUNT(*). "
-        "If the user wants top-N results, use LIMIT N. "
-        "Do not use columns that don't exist in the schema."
+        "You are a SQLite expert. Write ONE valid SQLite SELECT query for the user question.\n"
+        "Rules:\n"
+        "- Output ONLY raw SQL, no markdown fences, no explanation.\n"
+        "- Use LOWER() for all string comparisons.\n"
+        "- Never invent column names — use only columns listed in the schema.\n"
+        "- For aggregations (AVG, COUNT) always give the result an alias.\n"
+        "- Default LIMIT 20 for list queries, no limit for aggregations.\n"
+        "- For free vs paid comparisons use: GROUP BY is_free\n"
+        "- For language filters use: LOWER(languages) LIKE '%korean%'\n"
+        "- For genre filters use: LOWER(genre) LIKE '%action%'\n"
+        "- For game name search use: LOWER(name) LIKE '%counter%'\n"
+        "- price_usd is already in USD dollars.\n"
+        f"\n{SCHEMA_DESCRIPTION}"
     )
-    user_msg = (
-        f"Table schema columns: {col_info}\n\n"
-        f"Sample row: {json.dumps(schema['sample'][0]) if schema['sample'] else 'N/A'}\n\n"
-        f"User question: {query}\n\n"
-        f"Write the SQL query:"
-    )
+    user_msg = f"User question: {query}\n\nSQL:"
 
     resp = _groq().chat.completions.create(
         model=MODEL,
         messages=[{"role": "system", "content": system},
                   {"role": "user",   "content": user_msg}],
-        max_tokens=400,
+        max_tokens=300,
         temperature=0.0,
     )
     sql = resp.choices[0].message.content.strip()
-    # Strip markdown fences if present
     sql = re.sub(r"```[a-z]*\n?", "", sql).strip().rstrip("`").strip()
     return sql
 
 
-# ── Natural language answer generator ─────────────────────────────────────────
+# ── Answer generator ──────────────────────────────────────────────────────────
 
-def _generate_answer(
-    query: str,
-    intent: str,
-    rows: list[dict],
-    extra_context: str = "",
-    history_text: str = "",
-) -> str:
-    data_summary = json.dumps(rows[:20], default=str) if rows else "No results found."
+def _generate_answer(query: str, intent: str, rows: list,
+                     extra_context: str = "", history_text: str = "") -> str:
+    data_str = json.dumps(rows[:25], default=str) if rows else "No results found."
 
     system = (
-        "You are NEXUS, a game analytics assistant. "
-        "Answer the user's question using ONLY the provided data. "
-        "Be concise, friendly, and factual. "
-        "If the data is empty, say so politely. "
-        "Never make up game names or statistics."
+        "You are NEXUS, a friendly and precise game analytics assistant for Steam game data.\n"
+        "Rules:\n"
+        "- Answer using ONLY the data provided — never invent numbers or game names.\n"
+        "- Be concise and direct.\n"
+        "- For comparisons, clearly state both values.\n"
+        "- For lists, mention the top items by name.\n"
+        "- If no data was found, say so and suggest rephrasing.\n"
+        "- Format numbers nicely (e.g. 7.20/10, $9.99, ₹831).\n"
     )
-    context_block = ""
+
+    ctx = ""
     if history_text:
-        context_block = f"\n\nPrevious conversation:\n{history_text}\n"
+        ctx += f"\nConversation history:\n{history_text}\n"
     if extra_context:
-        context_block += f"\n\nExtra context:\n{extra_context}\n"
+        ctx += f"\nExtra context:\n{extra_context}\n"
 
     user_msg = (
-        f"User question: {query}\n"
-        f"Query intent: {intent}\n"
-        f"Data retrieved:\n{data_summary}"
-        f"{context_block}"
-        f"\n\nProvide a clear, human-readable answer:"
+        f"Question: {query}\n"
+        f"Intent: {intent}\n"
+        f"Data:\n{data_str}"
+        f"{ctx}\n"
+        f"Answer:"
     )
 
     resp = _groq().chat.completions.create(
         model=MODEL,
         messages=[{"role": "system", "content": system},
                   {"role": "user",   "content": user_msg}],
-        max_tokens=600,
-        temperature=0.3,
+        max_tokens=500,
+        temperature=0.2,
     )
     return resp.choices[0].message.content.strip()
 
 
-# ── Main orchestrator ─────────────────────────────────────────────────────────
+# ── Main entry point ──────────────────────────────────────────────────────────
 
-def process_query(
-    query: str,
-    conn: sqlite3.Connection,
-    df: pd.DataFrame,
-    schema: dict,
-    session_id: str | None = None,
-) -> dict:
+def process_query(query: str, conn: sqlite3.Connection,
+                  df: pd.DataFrame, schema: dict,
+                  session_id: str = None) -> dict:
     t0 = time.time()
 
-    # Session
     if not session_id:
         session_id = new_session()
     history_text = history_as_text(session_id)
 
-    # 1. Intent
     intent = classify_intent(query)
 
-    # 2. Irrelevant fallback
+    # ── Irrelevant query ──────────────────────────────────────────────────────
     if intent == "irrelevant":
         response_text = (
-            "I'm NEXUS, a game analytics assistant specialised in Steam game data. "
-            "I can help you with questions about game prices, ratings, genres, languages, "
-            "multiplayer features, release trends, and more. "
-            "Could you ask me something about games?"
+            "I'm NEXUS, a game analytics assistant for Steam game data. "
+            "I can answer questions about game prices, ratings, genres, language support, "
+            "multiplayer features, release years, and more. "
+            "Please ask me something about games!"
         )
-        result = {
+        add_turn(session_id, query, response_text)
+        return {
             "response": response_text,
             "metadata": {
                 "query_type": "irrelevant",
                 "confidence_score": 1.0,
-                "games": [],
-                "statistics": {},
+                "games": [], "statistics": {},
                 "session_id": session_id,
                 "execution_time_ms": int((time.time() - t0) * 1000),
             },
         }
-        add_turn(session_id, query, response_text)
-        return result
 
     rows = []
     extra_context = ""
     currency_info = {}
     sql_used = ""
     error_msg = None
+    statistics = {}
 
     try:
-        # 3. Build & run SQL
-        sql_used = _build_sql(query, schema, intent)
+        # ── Build + run SQL ───────────────────────────────────────────────────
+        sql_used = _build_sql(query, intent)
         rows = run_query(conn, sql_used)
 
-        # Check for SQL error
         if rows and "error" in rows[0]:
             error_msg = rows[0]["error"]
-            rows = []
+            # Fallback: simpler SQL
+            sql_used = _build_sql(f"Simple version: {query}", intent)
+            rows = run_query(conn, sql_used)
+            if rows and "error" in rows[0]:
+                rows = []
 
-        # 4. Currency handling
-        if intent == "currency" or CURRENCY_PATTERNS.search(query):
+        # ── Currency conversion ───────────────────────────────────────────────
+        if intent == "currency" or CURRENCY_RE.search(query):
             currencies = _extract_currencies(query)
-            # Try to find price in rows
+            price_found = 0.0
             for row in rows[:5]:
-                price_val = row.get("price") or row.get("price_usd") or 0
-                try:
-                    price_float = float(price_val)
-                except (TypeError, ValueError):
-                    price_float = 0.0
-                if price_float > 0:
-                    currency_info = convert_multiple(price_float, currencies)
-                    parts = [f"{v['display']}" for v in currency_info.values() if "display" in v]
-                    extra_context += f"Price conversions: {', '.join(parts)}. "
+                for key in ["price_usd", "price", "initialprice"]:
+                    val = row.get(key, 0)
+                    try:
+                        v = float(val)
+                        # initialprice is in cents if >100 and price_usd not present
+                        if key == "initialprice" and v > 100:
+                            v = v / 100
+                        if v > 0:
+                            price_found = v
+                            break
+                    except (TypeError, ValueError):
+                        pass
+                if price_found:
                     break
 
-        # 5. Compute basic statistics for stat queries
-        statistics = {}
-        if rows and intent in ("statistics", "comparison"):
-            numeric_keys = [k for k in rows[0].keys()
-                            if isinstance(rows[0][k], (int, float)) and k != "rowid"]
-            for k in numeric_keys[:5]:
-                vals = [r[k] for r in rows if isinstance(r.get(k), (int, float))]
-                if vals:
-                    statistics[k] = {
-                        "count": len(vals),
-                        "mean": round(sum(vals) / len(vals), 3),
-                        "min": min(vals),
-                        "max": max(vals),
-                    }
+            if price_found > 0:
+                currency_info = convert_multiple(price_found, currencies)
+                parts = [v["display"] for v in currency_info.values() if "display" in v]
+                extra_context += f"Price conversions: {', '.join(parts)}. "
+            else:
+                extra_context += "Price not found in dataset for this game. "
 
-        # 6. Generate natural language answer
-        answer = _generate_answer(query, intent, rows, extra_context, history_text)
+        # ── Statistics ────────────────────────────────────────────────────────
+        if rows and intent in ("statistics", "comparison"):
+            for k, v in rows[0].items():
+                if isinstance(v, (int, float)):
+                    statistics[k] = v
 
     except Exception as exc:
-        answer = (
-            f"I encountered an issue processing your query: {exc}. "
-            "Please try rephrasing or ask a different question about games."
-        )
         error_msg = str(exc)
 
-    # Confidence heuristic
-    confidence = 0.5
-    if rows and not error_msg:
-        coverage = min(len(rows) / 10, 1.0)
-        confidence = round(0.6 + 0.4 * coverage, 2)
-    elif error_msg:
+    # ── Generate answer ───────────────────────────────────────────────────────
+    try:
+        answer = _generate_answer(query, intent, rows, extra_context, history_text)
+    except Exception as exc:
+        answer = f"I had trouble generating an answer: {exc}. Please try again."
+
+    # ── Confidence score ──────────────────────────────────────────────────────
+    if error_msg:
         confidence = 0.2
+    elif not rows:
+        confidence = 0.3
+    else:
+        confidence = round(min(0.6 + 0.4 * (len(rows) / 10), 1.0), 2)
 
     result = {
         "response": answer,
         "metadata": {
             "query_type": intent,
             "confidence_score": confidence,
-            "games": rows[:10],          # cap to 10 for readability
+            "games": rows[:10],
             "total_results": len(rows),
             "statistics": statistics,
             "currency_rates": currency_info,
